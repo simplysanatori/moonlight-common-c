@@ -905,6 +905,8 @@ typedef struct _RTP_VIDEO_STATS {
     uint32_t packetCountOOS;           // out-of-sequence packets
     uint32_t packetCountInvalid;       // corrupted packets, etc
     uint32_t packetCountFecInvalid;    // invalid FEC packet
+    uint32_t packetCountHeldForReorder; // next-frame packets held while the current frame was incomplete
+    uint32_t frameCountReorderRescued;  // frames completed by late packets while next-frame packets were held
 } RTP_VIDEO_STATS, *PRTP_VIDEO_STATS;
 
 const RTP_VIDEO_STATS* LiGetRTPVideoStats(void);

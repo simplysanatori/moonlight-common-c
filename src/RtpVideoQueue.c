@@ -17,6 +17,16 @@
 // RTP packets use a 90 KHz presentation timestamp clock
 #define PTS_DIVISOR 90
 
+// On Wi-Fi, packets can arrive out of order across a frame boundary: the
+// first packets of the next frame overtake the last packets of this one.
+// Rather than give up on this frame as soon as the next one starts, hold the
+// next frame's packets back for up to this long, or this many packets, in
+// case this frame's stragglers are still coming. Without reordering nothing
+// is held, so this costs nothing; with a real loss, the next frame is
+// delayed by at most the wait.
+#define RTPV_REORDER_WAIT_US 10000
+#define RTPV_REORDER_MAX_HELD_PACKETS 256
+
 void RtpvInitializeQueue(PRTP_VIDEO_QUEUE queue) {
     reed_solomon_init();
     memset(queue, 0, sizeof(*queue));
@@ -39,6 +49,7 @@ static void purgeListEntries(PRTPV_QUEUE_LIST list) {
 void RtpvCleanupQueue(PRTP_VIDEO_QUEUE queue) {
     purgeListEntries(&queue->pendingFecBlockList);
     purgeListEntries(&queue->completedFecBlockList);
+    purgeListEntries(&queue->earlyPacketList);
 }
 
 static void insertEntryIntoList(PRTPV_QUEUE_LIST list, PRTPV_QUEUE_ENTRY entry) {
@@ -541,6 +552,39 @@ uint32_t RtpvGetCurrentFrameNumber(PRTP_VIDEO_QUEUE queue) {
     return queue->currentFrameNumber;
 }
 
+static int addConvertedPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_QUEUE_ENTRY packetEntry);
+
+// Holds a packet of the next frame back while the current frame may still
+// complete. The queue owns it from here.
+static void holdEarlyPacket(PRTP_VIDEO_QUEUE queue, PRTPV_QUEUE_ENTRY entry, PRTP_PACKET packet, int length) {
+    if (queue->earlyPacketList.count == 0) {
+        queue->earlyPacketHoldStartUs = PltGetMicroseconds();
+    }
+    memset(entry, 0, sizeof(*entry));
+    entry->packet = packet;
+    entry->length = length;
+    insertEntryIntoList(&queue->earlyPacketList, entry);
+    queue->stats.packetCountHeldForReorder++;
+}
+
+// Feeds held packets back in, in the order they arrived: after the current
+// frame completed, or after giving up on it
+static void replayEarlyPackets(PRTP_VIDEO_QUEUE queue) {
+    if (queue->replayingEarlyPackets) {
+        return;
+    }
+    queue->replayingEarlyPackets = true;
+    while (queue->earlyPacketList.head != NULL) {
+        PRTPV_QUEUE_ENTRY entry = queue->earlyPacketList.head;
+        removeEntryFromList(&queue->earlyPacketList, entry);
+        if (addConvertedPacket(queue, entry->packet, entry->length, entry) == RTPF_RET_REJECTED) {
+            // The packet buffer holds its own entry, so this frees both
+            free(entry->packet);
+        }
+    }
+    queue->replayingEarlyPackets = false;
+}
+
 int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_QUEUE_ENTRY packetEntry) {
     if (isBefore16(packet->sequenceNumber, queue->nextContiguousSequenceNumber)) {
         // Reject packets behind our current buffer window
@@ -572,6 +616,45 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
     if (!queue->multiFecCapable) {
         nvPacket->multiFecFlags = 0x10;
         nvPacket->multiFecBlocks = 0x00;
+    }
+
+    return addConvertedPacket(queue, packet, length, packetEntry);
+}
+
+// The rest of adding a packet, once its fields are in host byte order, so
+// held packets can be fed back in
+static int addConvertedPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_QUEUE_ENTRY packetEntry) {
+    if (isBefore16(packet->sequenceNumber, queue->nextContiguousSequenceNumber)) {
+        // Reject packets behind our current buffer window
+        return RTPF_RET_REJECTED;
+    }
+
+    int dataOffset = sizeof(*packet);
+    if (packet->header & FLAG_EXTENSION) {
+        dataOffset += 4; // 2 additional fields
+    }
+    PNV_VIDEO_PACKET nvPacket = (PNV_VIDEO_PACKET)(((char*)packet) + dataOffset);
+
+    // A packet of the next frame while this one is still incomplete: hold it
+    // back for a little while, in case this frame's late packets turn up
+    if (!queue->replayingEarlyPackets && queue->pendingFecBlockList.count != 0 &&
+            nvPacket->frameIndex == queue->currentFrameNumber + 1) {
+        if (queue->earlyPacketList.count < RTPV_REORDER_MAX_HELD_PACKETS &&
+                (queue->earlyPacketList.count == 0 ||
+                 PltGetMicroseconds() - queue->earlyPacketHoldStartUs < RTPV_REORDER_WAIT_US)) {
+            holdEarlyPacket(queue, packetEntry, packet, length);
+            return RTPF_RET_QUEUED;
+        }
+    }
+
+    // Anything else that would move past the current frame means waiting is
+    // over: give up on it with the held packets first, in their arrival order,
+    // then carry on with this one
+    if (queue->earlyPacketList.count != 0 && nvPacket->frameIndex != queue->currentFrameNumber) {
+        replayEarlyPackets(queue);
+        if (isBefore16(packet->sequenceNumber, queue->nextContiguousSequenceNumber)) {
+            return RTPF_RET_REJECTED;
+        }
     }
 
 #ifndef LC_FUZZING
@@ -802,6 +885,13 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
                 // Continue to the next frame
                 queue->currentFrameNumber++;
                 queue->multiFecCurrentBlockNumber = 0;
+
+                // This frame's late packets arrived while the next frame was
+                // held back: it was saved, so now feed the next frame in
+                if (queue->earlyPacketList.count != 0 && !queue->replayingEarlyPackets) {
+                    queue->stats.frameCountReorderRescued++;
+                    replayEarlyPackets(queue);
+                }
             }
         }
 
