@@ -24,8 +24,14 @@
 // case this frame's stragglers are still coming. Without reordering nothing
 // is held, so this costs nothing; with a real loss, the next frame is
 // delayed by at most the wait.
-#define RTPV_REORDER_WAIT_US 10000
+#define RTPV_REORDER_WAIT_US_DEFAULT 10000
 #define RTPV_REORDER_MAX_HELD_PACKETS 256
+
+static uint32_t reorderWaitUs = RTPV_REORDER_WAIT_US_DEFAULT;
+
+void LiSetVideoReorderWaitUs(uint32_t waitUs) {
+    reorderWaitUs = waitUs;
+}
 
 void RtpvInitializeQueue(PRTP_VIDEO_QUEUE queue) {
     reed_solomon_init();
@@ -637,11 +643,11 @@ static int addConvertedPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int le
 
     // A packet of the next frame while this one is still incomplete: hold it
     // back for a little while, in case this frame's late packets turn up
-    if (!queue->replayingEarlyPackets && queue->pendingFecBlockList.count != 0 &&
+    if (reorderWaitUs != 0 && !queue->replayingEarlyPackets && queue->pendingFecBlockList.count != 0 &&
             nvPacket->frameIndex == queue->currentFrameNumber + 1) {
         if (queue->earlyPacketList.count < RTPV_REORDER_MAX_HELD_PACKETS &&
                 (queue->earlyPacketList.count == 0 ||
-                 PltGetMicroseconds() - queue->earlyPacketHoldStartUs < RTPV_REORDER_WAIT_US)) {
+                 PltGetMicroseconds() - queue->earlyPacketHoldStartUs < reorderWaitUs)) {
             holdEarlyPacket(queue, packetEntry, packet, length);
             return RTPF_RET_QUEUED;
         }
