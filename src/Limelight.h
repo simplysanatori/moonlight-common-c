@@ -897,6 +897,12 @@ typedef struct _RTP_VIDEO_STATS {
 
 const RTP_VIDEO_STATS* LiGetRTPVideoStats(void);
 
+// How long to hold the next frame's packets while the current frame is still
+// incomplete, in case its late packets are on their way (packets can arrive
+// out of order on Wi-Fi). 0 restores giving up on the frame immediately. The
+// default is 10 ms. Takes effect for packets received after the call.
+void LiSetVideoReorderWaitUs(uint32_t waitUs);
+
 // Port index flags for use with LiGetPortFromPortFlagIndex() and LiGetProtocolFromPortFlagIndex()
 #define ML_PORT_INDEX_TCP_47984 0
 #define ML_PORT_INDEX_TCP_47989 1

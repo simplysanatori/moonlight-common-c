@@ -25,7 +25,7 @@ typedef struct _RTP_VIDEO_QUEUE {
 
     // Packets of the next frame that arrived while the current frame was still
     // incomplete, held back in arrival order in case the current frame's late
-    // packets are still on their way (see RTPV_REORDER_WAIT_US)
+    // packets are still on their way (see LiSetVideoReorderWaitUs)
     RTPV_QUEUE_LIST earlyPacketList;
     uint64_t earlyPacketHoldStartUs;
     bool replayingEarlyPackets;
