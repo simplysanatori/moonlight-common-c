@@ -380,14 +380,27 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
 
     // Resolve LocalAddr by RemoteAddr.
     {
-        SOCKADDR_LEN localAddrLen;
+        // Vita fork change: a failed or odd local address probe is not fatal. Before 305993b a
+        // failed getsockname() on the RTSP socket was only logged and left LocalAddr zeroed, which
+        // means wildcard binds (bindUdpSocket() and ControlStream.c both handle ss_family == 0).
+        // SceNet behaviour for this probe is unverified, so keep that fallback.
+        SOCKADDR_LEN localAddrLen = 0;
         err = getLocalAddressByUdpConnect(&RemoteAddr, AddrLen, RtspPortNumber, &LocalAddr, &localAddrLen);
         if (err != 0) {
-            Limelog("failed to resolve local addr: %d\n", err);
-            ListenerCallbacks.stageFailed(STAGE_NAME_RESOLUTION, err);
-            goto Cleanup;
+            Limelog("failed to resolve local addr: %d (using wildcard bind)\n", err);
+            memset(&LocalAddr, 0, sizeof(LocalAddr));
+            err = 0;
         }
-        LC_ASSERT(localAddrLen == AddrLen);
+        else if (LocalAddr.ss_family != RemoteAddr.ss_family || localAddrLen != AddrLen) {
+            Limelog("unexpected local addr (family %d, len %d, expected %d); using wildcard bind\n",
+                    (int)LocalAddr.ss_family, (int)localAddrLen, (int)AddrLen);
+            memset(&LocalAddr, 0, sizeof(LocalAddr));
+        }
+        else {
+            char localAddrStr[URLSAFESTRING_LEN];
+            addrToUrlSafeString(&LocalAddr, localAddrStr, sizeof(localAddrStr));
+            Limelog("local addr: %s\n", localAddrStr);
+        }
     }
 
     stage++;
